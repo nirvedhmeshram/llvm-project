@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/Dialect/Vector/VectorRewritePatterns.h"
 #include "mlir/Dialect/Vector/VectorUtils.h"
 #include "mlir/IR/Builders.h"
@@ -220,6 +221,141 @@ struct CastAwayTransferWriteLeadingOneDim
   }
 };
 
+// Turns vector.contract on vector with leading 1 dimensions into
+// vector.extract followed by vector.contract on vector without leading
+// 1 dimensions. Also performs tranpose of lhs and rhs operands if required
+// prior to extract
+struct CastAwayContractionLeadingOneDim
+    : public OpRewritePattern<vector::ContractionOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::ContractionOp contractOp,
+                                PatternRewriter &rewriter) const override {
+    VectorType oldLhsType = contractOp.getLhsType();
+    VectorType oldRhsType = contractOp.getRhsType();
+    VectorType oldAccType =
+        contractOp.getAccType().dyn_cast_or_null<VectorType>();
+    if (oldAccType == nullptr)
+      return failure();
+    if (oldLhsType.getRank() < 2 ||
+        oldRhsType.getRank() <
+            2 || // dropping dim for rank==1 doesnt make sense
+        oldAccType.getRank() < 2)
+      return failure();
+    if (llvm::size(contractOp.masks()) != 0)
+      return failure();
+    VectorType newAccType = trimLeadingOneDims(oldAccType);
+    if (newAccType == oldAccType)
+      return failure();
+    int64_t dropDim = 1; // currently we support only dropping one dim but the
+                         // pattern can be applied greedily to drop more
+
+    auto oldIndexingMaps = contractOp.getIndexingMaps();
+    SmallVector<AffineMap, 4> newIndexingMaps;
+
+    auto oldIteratorTypes = contractOp.iterator_types();
+    SmallVector<Attribute, 4> newIteratorTypes;
+    std::array<bool, 3> validExtract = {
+        false, false}; // to check if the dim to be dropped exists in lhs and
+                       // rhs and is a leading dim
+
+    for (const auto &it : llvm::enumerate(oldIteratorTypes)) {
+      int64_t idx = it.index();
+      if (idx == 0) {
+        if (!isParallelIterator(
+                it.value())) // reduction type iterators cannot be dropped
+          return failure();
+        continue;
+      }
+      newIteratorTypes.push_back(it.value());
+    }
+
+    auto lhs = contractOp.lhs();
+    auto rhs = contractOp.rhs();
+    for (const auto &it : llvm::enumerate(oldIndexingMaps)) {
+      SmallVector<AffineExpr, 4> results;
+      int64_t idx = it.value().getDimPosition(0);
+      auto map = it.value();
+      if (idx != 0) {
+        if (it.index() == 0) { // lhs operand requires transpose in order to
+                               // make the unit dim leading
+          SmallVector<int64_t> perm;
+          SmallVector<AffineExpr, 4> transposeResults;
+          for (int64_t i = 0, e = map.getNumResults(); i < e; ++i) {
+            int64_t idx2 = map.getDimPosition(i);
+            if (idx2 == 0) {
+              perm.insert(perm.begin(), i);
+              auto targetExpr = rewriter.getAffineDimExpr(idx2);
+              transposeResults.insert(transposeResults.begin(), targetExpr);
+            } else {
+              perm.push_back(i);
+              auto targetExpr = rewriter.getAffineDimExpr(idx2);
+              transposeResults.push_back(targetExpr);
+            }
+          }
+          map = AffineMap::get(map.getNumDims(), 0, transposeResults,
+                               contractOp.getContext());
+          lhs = rewriter.create<vector::TransposeOp>(contractOp.getLoc(), lhs,
+                                                     perm);
+        }
+        if (it.index() == 1) { // rhs operand requires transpose in order to
+                               // make the unit dim leading
+          SmallVector<int64_t> perm;
+          SmallVector<AffineExpr, 4> transposeResults;
+          for (int64_t i = 0, e = map.getNumResults(); i < e; ++i) {
+            int64_t idx2 = map.getDimPosition(i);
+            if (idx2 == 0) {
+              perm.insert(perm.begin(), i);
+              auto targetExpr = rewriter.getAffineDimExpr(idx2);
+              transposeResults.insert(transposeResults.begin(), targetExpr);
+            } else {
+              perm.push_back(i);
+              auto targetExpr = rewriter.getAffineDimExpr(idx2);
+              transposeResults.push_back(targetExpr);
+            }
+          }
+          map = AffineMap::get(map.getNumDims(), 0, transposeResults,
+                               contractOp.getContext());
+          rhs = rewriter.create<vector::TransposeOp>(contractOp.getLoc(), rhs,
+                                                     perm);
+        }
+        if (it.index() == 2) // acc opernand has a transposition in the leading
+                             // Dim, we dont support this
+          return failure();
+      }
+      if (map.getDimPosition(0) == 0 && it.index() < 2)
+        validExtract[it.index()] = true;
+
+      for (int64_t i = 0, e = map.getNumResults(); i < e; ++i) {
+        int64_t idx = map.getDimPosition(i);
+        if (idx == 0) // This is the dimension we are removing
+          continue;
+        auto targetExpr = rewriter.getAffineDimExpr(idx - 1);
+        results.push_back(targetExpr);
+      }
+      newIndexingMaps.push_back(AffineMap::get(map.getNumDims() - 1, 0, results,
+                                               contractOp.getContext()));
+    }
+    auto newLhs = validExtract[0]
+                      ? rewriter.create<vector::ExtractOp>(
+                            contractOp.getLoc(), lhs, splatZero(dropDim))
+                      : lhs;
+    auto newRhs = validExtract[1]
+                      ? rewriter.create<vector::ExtractOp>(
+                            contractOp.getLoc(), rhs, splatZero(dropDim))
+                      : rhs;
+    auto newAcc = rewriter.create<vector::ExtractOp>(
+        contractOp.getLoc(), contractOp.acc(), splatZero(dropDim));
+    auto newContractOp = rewriter.create<vector::ContractionOp>(
+        contractOp.getLoc(), newLhs, newRhs, newAcc,
+        rewriter.getAffineMapArrayAttr(newIndexingMaps),
+        rewriter.getArrayAttr(newIteratorTypes));
+    rewriter.replaceOpWithNewOp<vector::BroadcastOp>(
+        contractOp, contractOp->getResultTypes()[0], newContractOp);
+    return success();
+  }
+};
+
 class CastAwayElementwiseLeadingOneDim : public RewritePattern {
 public:
   CastAwayElementwiseLeadingOneDim(MLIRContext *context)
@@ -260,10 +396,11 @@ public:
 
 void mlir::vector::populateCastAwayVectorLeadingOneDimPatterns(
     RewritePatternSet &patterns) {
-  patterns.add<CastAwayExtractStridedSliceLeadingOneDim,
-               CastAwayInsertStridedSliceLeadingOneDim,
-               CastAwayTransferReadLeadingOneDim,
-               CastAwayTransferWriteLeadingOneDim,
-               CastAwayElementwiseLeadingOneDim>(patterns.getContext());
+  patterns
+      .add<CastAwayExtractStridedSliceLeadingOneDim,
+           CastAwayInsertStridedSliceLeadingOneDim,
+           CastAwayTransferReadLeadingOneDim,
+           CastAwayTransferWriteLeadingOneDim, CastAwayElementwiseLeadingOneDim,
+           CastAwayContractionLeadingOneDim>(patterns.getContext());
   populateShapeCastFoldingPatterns(patterns);
 }
