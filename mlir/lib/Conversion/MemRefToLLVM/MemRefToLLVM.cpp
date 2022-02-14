@@ -835,9 +835,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
   using ConvertOpToLLVMPattern<memref::CopyOp>::ConvertOpToLLVMPattern;
 
   LogicalResult
-  lowerToMemCopyIntrinsic(memref::CopyOp op, OpAdaptor adaptor,
-                          ConversionPatternRewriter &rewriter) const {
-    auto loc = op.getLoc();
+  matchAndRewrite(memref::CopyOp op, OpAdaptor adaptor,
+                          ConversionPatternRewriter &rewriter)const override {
+    /*auto loc = op.getLoc();
     auto srcType = op.source().getType().dyn_cast<MemRefType>();
 
     MemRefDescriptor srcDesc(adaptor.source());
@@ -871,7 +871,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 
   LogicalResult
   lowerToMemCopyFunctionCall(memref::CopyOp op, OpAdaptor adaptor,
-                             ConversionPatternRewriter &rewriter) const {
+                             ConversionPatternRewriter &rewriter) const {*/
     auto loc = op.getLoc();
     auto srcType = op.source().getType().cast<BaseMemRefType>();
     auto targetType = op.target().getType().cast<BaseMemRefType>();
@@ -927,7 +927,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     return success();
   }
 
-  LogicalResult
+  /*LogicalResult
   matchAndRewrite(memref::CopyOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto srcType = op.source().getType().cast<BaseMemRefType>();
@@ -940,7 +940,7 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return lowerToMemCopyIntrinsic(op, adaptor, rewriter);
 
     return lowerToMemCopyFunctionCall(op, adaptor, rewriter);
-  }
+  }*/
 };
 
 /// Extracts allocated, aligned pointers and offset from a ranked or unranked
