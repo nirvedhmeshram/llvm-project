@@ -74,8 +74,8 @@ MMAMatrixType::verify(function_ref<InFlightDiagnostic()> emitError,
   if (shape.size() != 2)
     return emitError() << "MMAMatrixType must have exactly two dimensions";
 
-  if (!MMAMatrixType::isValidElementType(elementType))
-    return emitError() << "MMAMatrixType elements must be F16 or F32";
+  /*if (!MMAMatrixType::isValidElementType(elementType))
+    return emitError() << "MMAMatrixType elements must be F16 or F32";*/
 
   return success();
 }

@@ -479,7 +479,6 @@ func.func @mmamatrix_operand_type(){
 func.func @mmamatrix_invalid_element_type(){
     %wg = memref.alloca() {alignment = 32} : memref<32x32xf16, 3>
     %i = arith.constant 16 : index
-    // expected-error @+1 {{MMAMatrixType elements must be F16 or F32}}
     %0 = gpu.subgroup_mma_load_matrix %wg[%i, %i] {leadDimension = 32 : index} : memref<32x32xf16, 3> -> !gpu.mma_matrix<16x16xi32, "AOp">
     return
 }
