@@ -25,6 +25,8 @@ static Type inferIntrinsicResultType(Type vectorResultType) {
   auto i32x2Ty = LLVM::getFixedVectorType(i32Ty, 2);
   Type f64Ty = Float64Type::get(ctx);
   Type f64x2Ty = LLVM::getFixedVectorType(f64Ty, 2);
+  Type f32Ty = Float32Type::get(ctx);
+  Type f32x2Ty = LLVM::getFixedVectorType(f32Ty, 2);
   if (a.getElementType() == f16x2Ty) {
     return LLVM::LLVMStructType::getLiteral(
         ctx, SmallVector<Type>(a.getNumElements(), f16x2Ty));
@@ -36,6 +38,11 @@ static Type inferIntrinsicResultType(Type vectorResultType) {
   }
   if (a.getElementType() == f64x2Ty) {
     return LLVM::LLVMStructType::getLiteral(ctx, {f64Ty, f64Ty});
+  }
+  if (a.getElementType() == f32x2Ty) {
+    return LLVM::LLVMStructType::getLiteral(
+        ctx,
+        SmallVector<Type>(static_cast<size_t>(a.getNumElements()) * 2, f32Ty));
   }
   return vectorResultType;
 }
@@ -52,10 +59,12 @@ static Value convertIntrinsicResult(Location loc, Type intrinsicResultType,
   auto structType = intrinsicResultType.dyn_cast<LLVM::LLVMStructType>();
   auto arrayType = resultType.dyn_cast<LLVM::LLVMArrayType>();
   Type i32Ty = rewriter.getI32Type();
+  Type f32Ty = rewriter.getF32Type();
   Type f64Ty = rewriter.getF64Type();
   Type f16x2Ty = LLVM::getFixedVectorType(rewriter.getF16Type(), 2);
   Type i32x2Ty = LLVM::getFixedVectorType(i32Ty, 2);
   Type f64x2Ty = LLVM::getFixedVectorType(f64Ty, 2);
+  Type f32x2Ty = LLVM::getFixedVectorType(f32Ty, 2);
 
   auto makeConst = [&](int32_t index) -> Value {
     return rewriter.create<LLVM::ConstantOp>(loc, IntegerType::get(ctx, 32),
@@ -73,13 +82,15 @@ static Value convertIntrinsicResult(Location loc, Type intrinsicResultType,
       }
     }
 
-    // The intrinsic returns i32 and f64 values as individual scalars. We need
-    // to extract them from the struct and pack them into vectors.
+    // The intrinsic returns i32, f64, and f32 values as individual scalars. We
+    // need to extract them from the struct and pack them into vectors.
     if (arrayType.getElementType() == i32x2Ty ||
-        arrayType.getElementType() == f64x2Ty) {
-      Value vec =
-          rewriter.create<LLVM::UndefOp>(loc, arrayType.getElementType());
+        arrayType.getElementType() == f64x2Ty ||
+        arrayType.getElementType() == f32x2Ty) {
+
       for (unsigned i = 0, e = structType.getBody().size() / 2; i < e; i++) {
+        Value vec =
+            rewriter.create<LLVM::UndefOp>(loc, arrayType.getElementType());
         Value x1 = rewriter.create<LLVM::ExtractValueOp>(
             loc, structType.getBody()[i * 2], intrinsicResult,
             rewriter.getI64ArrayAttr(i * 2));
@@ -90,8 +101,8 @@ static Value convertIntrinsicResult(Location loc, Type intrinsicResultType,
                                                      x1, makeConst(0));
         vec = rewriter.create<LLVM::InsertElementOp>(loc, vec.getType(), vec,
                                                      x2, makeConst(1));
+        elements.push_back(vec);
       }
-      elements.push_back(vec);
     }
 
     // Create the final vectorized result.
@@ -117,6 +128,7 @@ static SmallVector<Value> unpackOperandVector(RewriterBase &rewriter,
   SmallVector<Value> result;
   Type i32Ty = rewriter.getI32Type();
   Type f64Ty = rewriter.getF64Type();
+  Type f32Ty = rewriter.getF32Type();
   Type i8Ty = rewriter.getI8Type();
   Type i8x4Ty = LLVM::getFixedVectorType(i8Ty, 4);
   auto arrayTy = operand.getType().cast<LLVM::LLVMArrayType>();
@@ -133,12 +145,13 @@ static SmallVector<Value> unpackOperandVector(RewriterBase &rewriter,
       continue;
     }
 
-    // For some element types (i32, f64), we need to unpack the inner
+    // For some element types (i32, f32, f64), we need to unpack the inner
     // vector/array type as well because the intrinsic expects individual
     // scalars to be provided.
     VectorType innerArrayTy = arrayTy.getElementType().dyn_cast<VectorType>();
     if (innerArrayTy && (innerArrayTy.getElementType() == i32Ty ||
-                         innerArrayTy.getElementType() == f64Ty)) {
+                         innerArrayTy.getElementType() == f64Ty ||
+                         innerArrayTy.getElementType() == f32Ty)) {
       for (unsigned idx = 0, innerSize = innerArrayTy.getNumElements();
            idx < innerSize; idx++) {
         result.push_back(rewriter.create<LLVM::ExtractElementOp>(
