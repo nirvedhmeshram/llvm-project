@@ -11,7 +11,10 @@
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/AMDGPU/AMDGPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/IR/TypeRange.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::amdgpu;
@@ -20,7 +23,7 @@ static Value createI32Constant(ConversionPatternRewriter &rewriter,
                                Location loc, int32_t value) {
   IntegerAttr valAttr = rewriter.getI32IntegerAttr(value);
   Type llvmI32 = rewriter.getI32Type();
-  return rewriter.create<LLVM::ConstantOp>(loc, llvmI32, valAttr);
+  return rewriter.createOrFold<LLVM::ConstantOp>(loc, llvmI32, valAttr);
 }
 
 namespace {
@@ -261,6 +264,112 @@ struct LDSBarrierOpLowering : public ConvertOpToLLVMPattern<LDSBarrierOp> {
   }
 };
 
+} // end anonymous namespace
+
+/// If `input` is a vector of bytes, concatentate those bytes in little-endian
+/// order to form a single integer of size 8 * [vector length]. This works
+/// around a wart in the AMDGPU intrinsics where operations that logically take
+/// vectors of bytes instead integers. Since we do not want to expose this
+/// implementation detail to MLIR, we correct for it here.
+static Value mfmaConcatIfNeeded(ConversionPatternRewriter &rewriter,
+                                Location loc, Value input) {
+  Type inputType = input.getType();
+  if (auto vectorType = inputType.dyn_cast<VectorType>()) {
+    if (vectorType.getElementType() != rewriter.getI8Type())
+      return input;
+    int64_t numBytes = vectorType.getNumElements();
+    Type destType = rewriter.getIntegerType(numBytes * 8);
+    Value result = rewriter.createOrFold<LLVM::ConstantOp>(
+        loc, destType, rewriter.getIntegerAttr(destType, 0));
+    for (int64_t i = 0; i < numBytes; ++i) {
+      Value idxConst = createI32Constant(rewriter, loc, i);
+      Value element =
+          rewriter.create<LLVM::ExtractElementOp>(loc, input, idxConst);
+      Value extended = rewriter.create<LLVM::ZExtOp>(loc, destType, element);
+      Value shiftConst = rewriter.createOrFold<LLVM::ConstantOp>(
+          loc, destType, rewriter.getIntegerAttr(destType, i * 8));
+      Value shifted = rewriter.create<LLVM::ShlOp>(loc, extended, shiftConst);
+      result = rewriter.create<LLVM::OrOp>(loc, result, shifted);
+    }
+    return result;
+  }
+  return input;
+}
+
+/// Return the `rocdl` intrinsic corresponding to a `MFMAInstr` value.
+/// This conversion happens here to allow code up the stack to handle the choice
+/// of mfma by picking between enum variants, which is much more ergonomic than
+/// picking between ops, at the cost of some long switch statements in this
+/// pass.
+static StringRef mfmaInstrToIntrinsicName(MFMAInstr instr) {
+#define LOWERING_CASE(type)                                                    \
+  case MFMAInstr::type:                                                        \
+    return ROCDL::mfma_##type::getOperationName();
+  switch (instr) {
+    LOWERING_CASE(f32_32x32x1f32)
+    LOWERING_CASE(f32_16x16x1f32)
+    LOWERING_CASE(f32_4x4x1f32)
+    LOWERING_CASE(f32_32x32x2f32)
+    LOWERING_CASE(f32_16x16x4f32)
+    LOWERING_CASE(f32_32x32x4f16)
+    LOWERING_CASE(f32_16x16x4f16)
+    LOWERING_CASE(f32_4x4x4f16)
+    LOWERING_CASE(f32_32x32x8f16)
+    LOWERING_CASE(f32_16x16x16f16)
+    LOWERING_CASE(i32_32x32x4i8)
+    LOWERING_CASE(i32_16x16x4i8)
+    LOWERING_CASE(i32_4x4x4i8)
+    LOWERING_CASE(i32_32x32x8i8)
+    LOWERING_CASE(i32_16x16x16i8)
+    LOWERING_CASE(f32_32x32x2bf16)
+    LOWERING_CASE(f32_16x16x2bf16)
+    LOWERING_CASE(f32_4x4x2bf16)
+    LOWERING_CASE(f32_32x32x4bf16)
+    LOWERING_CASE(f32_16x16x8bf16)
+    LOWERING_CASE(f32_32x32x4bf16_1k)
+    LOWERING_CASE(f32_16x16x4bf16_1k)
+    LOWERING_CASE(f32_4x4x4bf16_1k)
+    LOWERING_CASE(f32_32x32x8bf16_1k)
+    LOWERING_CASE(f32_16x16x16bf16_1k)
+    LOWERING_CASE(f64_16x16x4f64)
+    LOWERING_CASE(f64_4x4x4f64)
+    LOWERING_CASE(i32_16x16x32_i8)
+    LOWERING_CASE(i32_32x32x16_i8)
+    LOWERING_CASE(f32_16x16x8_xf32)
+    LOWERING_CASE(f32_32x32x4_xf32)
+  }
+#undef LOWERING_CASE
+}
+
+namespace {
+struct MFMAOpLowering : public ConvertOpToLLVMPattern<MFMAOp> {
+  MFMAOpLowering(LLVMTypeConverter &converter, Chipset chipset)
+      : ConvertOpToLLVMPattern<MFMAOp>(converter), chipset(chipset) {}
+
+  Chipset chipset;
+
+  LogicalResult
+  matchAndRewrite(MFMAOp op, MFMAOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type outType = typeConverter->convertType(op.destD().getType());
+
+    if (chipset.majorVersion != 9 || chipset.minorVersion < 0x08)
+      return op->emitOpError("MFMA only supported on gfx908+");
+    OperationState loweredOp(loc, mfmaInstrToIntrinsicName(op.instr()));
+    loweredOp.addTypes(outType);
+    loweredOp.addOperands({mfmaConcatIfNeeded(rewriter, loc, adaptor.sourceA()),
+                           mfmaConcatIfNeeded(rewriter, loc, adaptor.sourceB()),
+                           adaptor.destC(),
+                           createI32Constant(rewriter, loc, op.cbsz()),
+                           createI32Constant(rewriter, loc, op.abid()),
+                           createI32Constant(rewriter, loc, op.blgp())});
+    Operation *lowered = rewriter.create(loweredOp);
+    rewriter.replaceOp(op, lowered->getResults());
+    return success();
+  }
+};
+
 struct ConvertAMDGPUToROCDLPass
     : public ConvertAMDGPUToROCDLBase<ConvertAMDGPUToROCDLPass> {
   ConvertAMDGPUToROCDLPass() = default;
@@ -277,6 +386,7 @@ struct ConvertAMDGPUToROCDLPass
     LLVMTypeConverter converter(ctx);
     populateAMDGPUToROCDLConversionPatterns(converter, patterns, *maybeChipset);
     LLVMConversionTarget target(getContext());
+    target.addIllegalDialect<::mlir::amdgpu::AMDGPUDialect>();
     target.addLegalDialect<::mlir::LLVM::LLVMDialect>();
     target.addLegalDialect<::mlir::ROCDL::ROCDLDialect>();
     if (failed(applyPartialConversion(getOperation(), target,
@@ -284,7 +394,7 @@ struct ConvertAMDGPUToROCDLPass
       signalPassFailure();
   }
 };
-} // namespace
+} // end anonymous namespace
 
 void mlir::populateAMDGPUToROCDLConversionPatterns(LLVMTypeConverter &converter,
                                                    RewritePatternSet &patterns,
@@ -293,8 +403,8 @@ void mlir::populateAMDGPUToROCDLConversionPatterns(LLVMTypeConverter &converter,
   patterns.add<
       RawBufferOpLowering<RawBufferLoadOp, ROCDL::RawBufferLoadOp>,
       RawBufferOpLowering<RawBufferStoreOp, ROCDL::RawBufferStoreOp>,
-      RawBufferOpLowering<RawBufferAtomicFaddOp, ROCDL::RawBufferAtomicFAddOp>>(
-      converter, chipset);
+      RawBufferOpLowering<RawBufferAtomicFaddOp, ROCDL::RawBufferAtomicFAddOp>,
+      MFMAOpLowering>(converter, chipset);
 }
 
 std::unique_ptr<Pass> mlir::createConvertAMDGPUToROCDLPass() {
