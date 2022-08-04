@@ -518,7 +518,9 @@ static void emitAttributeSerialization(const Attribute &attr,
   os << tabs
      << formatv("if (auto attr = {0}->getAttr(\"{1}\")) {{\n", opVar, attrName);
   if (attr.getAttrDefName() == "SPV_ScopeAttr" ||
-      attr.getAttrDefName() == "SPV_MemorySemanticsAttr") {
+      attr.getAttrDefName() == "SPV_MemorySemanticsAttr" ||
+      attr.getAttrDefName() == "SPV_MatrixLayoutAttr") {
+
     os << tabs
        << formatv("  {0}.push_back(prepareConstantInt({1}.getLoc(), "
                   "attr.cast<IntegerAttr>()));\n",
@@ -796,7 +798,8 @@ static void emitAttributeDeserialization(const Attribute &attr,
                                          StringRef words, StringRef wordIndex,
                                          raw_ostream &os) {
   if (attr.getAttrDefName() == "SPV_ScopeAttr" ||
-      attr.getAttrDefName() == "SPV_MemorySemanticsAttr") {
+      attr.getAttrDefName() == "SPV_MemorySemanticsAttr"|| 
+      attr.getAttrDefName() == "SPV_MatrixLayoutAttr") {
     os << tabs
        << formatv("{0}.push_back(opBuilder.getNamedAttr(\"{1}\", "
                   "getConstantInt({2}[{3}++])));\n",

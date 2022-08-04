@@ -389,6 +389,7 @@ def SPV_INTEL_long_constant_composite            : I32EnumAttrCase<"SPV_INTEL_lo
 def SPV_INTEL_optnone                            : I32EnumAttrCase<"SPV_INTEL_optnone", 71>;
 def SPV_INTEL_debug_module                       : I32EnumAttrCase<"SPV_INTEL_debug_module", 72>;
 def SPV_INTEL_fp_fast_math_mode                  : I32EnumAttrCase<"SPV_INTEL_fp_fast_math_mode", 73>;
+def SPV_INTEL_joint_matrix                       : I32EnumAttrCase<"SPV_INTEL_joint_matrix", 4030>;
 
 def SPV_NV_compute_shader_derivatives    : I32EnumAttrCase<"SPV_NV_compute_shader_derivatives", 74>;
 def SPV_NV_cooperative_matrix            : I32EnumAttrCase<"SPV_NV_cooperative_matrix", 75>;
@@ -441,7 +442,7 @@ def SPV_ExtensionAttr :
       SPV_INTEL_fpga_buffer_location, SPV_INTEL_arbitrary_precision_fixed_point,
       SPV_INTEL_usm_storage_classes, SPV_INTEL_io_pipes, SPV_INTEL_blocking_pipes,
       SPV_INTEL_fpga_reg, SPV_INTEL_long_constant_composite, SPV_INTEL_optnone,
-      SPV_INTEL_debug_module, SPV_INTEL_fp_fast_math_mode,
+      SPV_INTEL_debug_module, SPV_INTEL_fp_fast_math_mode, SPV_INTEL_joint_matrix,
       SPV_NV_compute_shader_derivatives, SPV_NV_cooperative_matrix,
       SPV_NV_fragment_shader_barycentric, SPV_NV_geometry_shader_passthrough,
       SPV_NV_mesh_shader, SPV_NV_ray_tracing, SPV_NV_sample_mask_override_coverage,
@@ -1363,6 +1364,12 @@ def SPV_C_ShaderStereoViewNV                          : I32EnumAttrCase<"ShaderS
   ];
 }
 
+def SPV_C_JointMatrixINTEL                         : I32EnumAttrCase<"JointMatrixINTEL", 6118> {
+  list<Availability> availability = [
+    Extension<[SPV_INTEL_joint_matrix]>
+  ];
+}
+
 def SPV_CapabilityAttr :
     SPV_I32EnumAttr<"Capability", "valid SPIR-V Capability", [
       SPV_C_Matrix, SPV_C_Addresses, SPV_C_Linkage, SPV_C_Kernel, SPV_C_Float16,
@@ -1450,7 +1457,7 @@ def SPV_CapabilityAttr :
       SPV_C_UniformTexelBufferArrayNonUniformIndexing,
       SPV_C_StorageTexelBufferArrayNonUniformIndexing,
       SPV_C_ShaderViewportIndexLayerEXT, SPV_C_ShaderViewportMaskNV,
-      SPV_C_ShaderStereoViewNV
+      SPV_C_ShaderStereoViewNV, SPV_C_JointMatrixINTEL
     ]>;
 
 def SPV_AM_Logical                 : I32EnumAttrCase<"Logical", 0>;
@@ -3861,6 +3868,16 @@ def SPV_SamplerUseAttr:
       "ImageSamplerUseInfo", "valid SPIR-V Sampler Use specification",
       [SPV_ISUI_SamplerUnknown, SPV_ISUI_NeedSampler, SPV_ISUI_NoSampler]>;
 
+def SPV_ML_ColumnMajor : I32EnumAttrCase<"ColumnMajor", 0>;
+def SPV_ML_RowMajor    : I32EnumAttrCase<"RowMajor", 1>;
+def SPV_ML_PackedA     : I32EnumAttrCase<"PackedA", 2>;
+def SPV_ML_PackedB     : I32EnumAttrCase<"PackedB", 3>;
+
+def SPV_MatrixLayoutAttr  :
+    SPV_I32EnumAttr<"MatrixLayout", "valid SPIR-V MatrixLayout", [
+      SPV_ML_ColumnMajor, SPV_ML_RowMajor, SPV_ML_PackedA, SPV_ML_PackedB
+    ]>;
+
 //===----------------------------------------------------------------------===//
 // SPIR-V attribute definitions
 //===----------------------------------------------------------------------===//
@@ -3893,6 +3910,8 @@ def SPV_IsArrayType : CPred<"$_self.isa<::mlir::spirv::ArrayType>()">;
 def SPV_IsCooperativeMatrixType :
   CPred<"$_self.isa<::mlir::spirv::CooperativeMatrixNVType>()">;
 def SPV_IsImageType : CPred<"$_self.isa<::mlir::spirv::ImageType>()">;
+def SPV_IsJointMatrixType :
+  CPred<"$_self.isa<::mlir::spirv::JointMatrixINTELType>()">;
 def SPV_IsMatrixType : CPred<"$_self.isa<::mlir::spirv::MatrixType>()">;
 def SPV_IsPtrType : CPred<"$_self.isa<::mlir::spirv::PointerType>()">;
 def SPV_IsRTArrayType : CPred<"$_self.isa<::mlir::spirv::RuntimeArrayType>()">;
@@ -3923,6 +3942,8 @@ def SPV_AnyCooperativeMatrix : DialectType<SPIRV_Dialect,
                                "any SPIR-V cooperative matrix type">;
 def SPV_AnyImage : DialectType<SPIRV_Dialect, SPV_IsImageType,
                                 "any SPIR-V image type">;
+def SPV_AnyJointMatrix : DialectType<SPIRV_Dialect, SPV_IsJointMatrixType,
+                                "any SPIR-V joint matrix type">;
 def SPV_AnyMatrix : DialectType<SPIRV_Dialect, SPV_IsMatrixType,
                                 "any SPIR-V matrix type">;
 def SPV_AnyRTArray : DialectType<SPIRV_Dialect, SPV_IsRTArrayType,
@@ -3937,11 +3958,12 @@ def SPV_Scalar : AnyTypeOf<[SPV_Numerical, SPV_Bool]>;
 def SPV_Aggregate : AnyTypeOf<[SPV_AnyArray, SPV_AnyRTArray, SPV_AnyStruct]>;
 def SPV_Composite :
     AnyTypeOf<[SPV_Vector, SPV_AnyArray, SPV_AnyRTArray, SPV_AnyStruct,
-               SPV_AnyCooperativeMatrix, SPV_AnyMatrix]>;
+               SPV_AnyCooperativeMatrix, SPV_AnyJointMatrix, SPV_AnyMatrix]>;
 def SPV_Type : AnyTypeOf<[
     SPV_Void, SPV_Bool, SPV_Integer, SPV_Float, SPV_Vector,
     SPV_AnyPtr, SPV_AnyArray, SPV_AnyRTArray, SPV_AnyStruct,
-    SPV_AnyCooperativeMatrix, SPV_AnyMatrix, SPV_AnySampledImage
+    SPV_AnyCooperativeMatrix, SPV_AnyJointMatrix, SPV_AnyMatrix,
+    SPV_AnySampledImage
   ]>;
 
 def SPV_SignedInt : SignedIntOfWidths<[8, 16, 32, 64]>;
@@ -3952,12 +3974,25 @@ class SPV_CoopMatrixOfType<list<Type> allowedTypes> :
     "$_self.cast<::mlir::spirv::CooperativeMatrixNVType>().getElementType()",
     "Cooperative Matrix">;
 
+class SPV_JointMatrixOfType<list<Type> allowedTypes> :
+  ContainerType<AnyTypeOf<allowedTypes>, SPV_IsJointMatrixType,
+    "$_self.cast<::mlir::spirv::JointMatrixINTELType>().getElementType()",
+    "Joint Matrix">;
+
 class SPV_ScalarOrVectorOf<Type type> :
     AnyTypeOf<[type, VectorOfLengthAndType<[2, 3, 4, 8, 16], [type]>]>;
 
 class SPV_ScalarOrVectorOrCoopMatrixOf<Type type> :
     AnyTypeOf<[type, VectorOfLengthAndType<[2, 3, 4, 8, 16], [type]>,
                SPV_CoopMatrixOfType<[type]>]>;
+
+class SPV_ScalarOrVectorOrJointMatrixOf<Type type> :
+    AnyTypeOf<[type, VectorOfLengthAndType<[2, 3, 4, 8, 16], [type]>,
+               SPV_JointMatrixOfType<[type]>]>;
+
+class SPV_ScalarOrVectorOrCoopMatrixOfOrJointMatrixOf<Type type> :
+    AnyTypeOf<[type, VectorOfLengthAndType<[2, 3, 4, 8, 16], [type]>,
+               SPV_CoopMatrixOfType<[type]>, SPV_JointMatrixOfType<[type]> ]>;
 
 def SPV_ScalarOrVector : AnyTypeOf<[SPV_Scalar, SPV_Vector]>;
 def SPV_ScalarOrVectorOrPtr : AnyTypeOf<[SPV_ScalarOrVector, SPV_AnyPtr]>;
@@ -4190,6 +4225,11 @@ def SPV_OC_OpSubgroupBlockReadINTEL    : I32EnumAttrCase<"OpSubgroupBlockReadINT
 def SPV_OC_OpSubgroupBlockWriteINTEL   : I32EnumAttrCase<"OpSubgroupBlockWriteINTEL", 5576>;
 def SPV_OC_OpAssumeTrueKHR             : I32EnumAttrCase<"OpAssumeTrueKHR", 5630>;
 def SPV_OC_OpAtomicFAddEXT             : I32EnumAttrCase<"OpAtomicFAddEXT", 6035>;
+def SPV_OC_OpTypeJointMatrixINTEL      : I32EnumAttrCase<"OpTypeJointMatrixINTEL", 6119>;
+def SPV_OC_OpJointMatrixLoadINTEL      : I32EnumAttrCase<"OpJointMatrixLoadINTEL", 6120>;
+def SPV_OC_OpJointMatrixStoreINTEL     : I32EnumAttrCase<"OpJointMatrixStoreINTEL", 6121>;
+def SPV_OC_OpJointMatrixMadINTEL       : I32EnumAttrCase<"OpJointMatrixMadINTEL", 6122>;
+def SPV_OC_OpTypejointMatrixWorkItemLengthINTEL : I32EnumAttrCase<"OpJointMatrixWorkItemLengthINTEL", 6410>;
 
 def SPV_OpcodeAttr :
     SPV_I32EnumAttr<"Opcode", "valid SPIR-V instructions", [
@@ -4255,7 +4295,10 @@ def SPV_OpcodeAttr :
       SPV_OC_OpCooperativeMatrixLoadNV, SPV_OC_OpCooperativeMatrixStoreNV,
       SPV_OC_OpCooperativeMatrixMulAddNV, SPV_OC_OpCooperativeMatrixLengthNV,
       SPV_OC_OpSubgroupBlockReadINTEL, SPV_OC_OpSubgroupBlockWriteINTEL,
-      SPV_OC_OpAssumeTrueKHR, SPV_OC_OpAtomicFAddEXT
+      SPV_OC_OpAssumeTrueKHR, SPV_OC_OpAtomicFAddEXT,
+      SPV_OC_OpTypeJointMatrixINTEL, SPV_OC_OpJointMatrixLoadINTEL,
+      SPV_OC_OpJointMatrixStoreINTEL, SPV_OC_OpJointMatrixMadINTEL,
+      SPV_OC_OpTypejointMatrixWorkItemLengthINTEL
     ]>;
 
 // End opcode section. Generated from SPIR-V spec; DO NOT MODIFY!
