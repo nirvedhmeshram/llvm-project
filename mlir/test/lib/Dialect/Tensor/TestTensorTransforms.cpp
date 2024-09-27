@@ -94,6 +94,12 @@ struct TestTensorTransforms
       llvm::cl::desc("Test patterns to simplify tensor.pack and tensor.unpack"),
       llvm::cl::init(false)};
 
+  Option<bool> testPackToTransposePattern{
+      *this, "test-pack-to-transpose-pattern",
+      llvm::cl::desc("Test pattern to convert tensor.pack to linalg.transpose "
+                     "when possible"),
+      llvm::cl::init(false)};
+
   Option<bool> testTrackingListener{
       *this, "test-tracking-listener",
       llvm::cl::desc("Test tensor TrackingListener for the transform dialect"),
@@ -151,6 +157,12 @@ applyDropRedundantInsertSliceRankExpansionPatterns(Operation *rootOp) {
 static void applySimplifyPackUnpackPatterns(Operation *rootOp) {
   RewritePatternSet patterns(rootOp->getContext());
   tensor::populateSimplifyPackAndUnpackPatterns(patterns);
+  (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
+}
+
+static void applyPackToTransposePattern(Operation *rootOp) {
+  RewritePatternSet patterns(rootOp->getContext());
+  tensor::populatePackToTransposePattern(patterns);
   (void)applyPatternsAndFoldGreedily(rootOp, std::move(patterns));
 }
 
@@ -389,6 +401,8 @@ void TestTensorTransforms::runOnOperation() {
   Operation *rootOp = getOperation();
   if (testSimplifyPackUnpackPatterns)
     applySimplifyPackUnpackPatterns(rootOp);
+  if (testPackToTransposePattern)
+    applyPackToTransposePattern(rootOp);
   if (testFoldConstantExtractSlice)
     applyFoldConstantExtractSlicePatterns(rootOp);
   if (testFoldConsecutiveInsertExtractSlice)

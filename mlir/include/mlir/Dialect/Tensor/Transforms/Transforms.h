@@ -90,6 +90,10 @@ void populateDecomposeTensorConcatPatterns(RewritePatternSet &patterns);
 /// `tensor.unpack` operations.
 void populateSimplifyPackAndUnpackPatterns(RewritePatternSet &patterns);
 
+/// Populates `patterns` with pattern that converts `tensor.pack` to
+/// `lianlg.tranpose` when possible.
+void populatePackToTransposePattern(RewritePatternSet &patterns);
+
 /// Populates `patterns` with patterns that fold operations like `tensor.pad`
 /// and `tensor.extract_slice` into `tensor.pack` and `tensor.unpack` operations
 /// respectively.

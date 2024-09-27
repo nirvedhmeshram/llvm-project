@@ -479,6 +479,107 @@ struct FoldConsumerUnPackWithProducerLinalgTransposeOp
     return success();
   }
 };
+
+struct SimplifyPackToTranspose : public OpRewritePattern<PackOp> {
+  using OpRewritePattern<PackOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PackOp packOp,
+                                PatternRewriter &rewriter) const override {
+
+    // Padding is not supported by the pattern.
+    if (packOp.getPaddingValue())
+      return success();
+    llvm::ArrayRef<int64_t> outerDimsPerm = packOp.getOuterDimsPerm();
+
+    if (!outerDimsPerm.empty() && !isIdentityPermutation(outerDimsPerm)) {
+      return rewriter.notifyMatchFailure(
+          packOp,
+          "expects outer_dims_perm is empty or an identity permutation");
+    }
+    Location loc = packOp.getLoc();
+    llvm::ArrayRef<int64_t> innerTiles = packOp.getStaticInnerTiles();
+    llvm::ArrayRef<int64_t> innerDimsPos = packOp.getInnerDimsPos();
+
+    // Currently we only handle pack op with static inner tile sizes.
+    if (llvm::any_of(innerTiles, [](int64_t size) {
+          return ShapedType::isDynamic(size);
+        })) {
+      return success();
+    }
+    SmallVector<OpFoldResult> newInnerTiles;
+    SmallVector<int64_t> newInnerDimsPos;
+
+    for (size_t i = 0; i < innerTiles.size(); ++i) {
+      if (innerTiles[i] != 1) {
+        newInnerTiles.push_back(rewriter.getIndexAttr(innerTiles[i]));
+        // newPermutation.push_back(permutation[i]);
+        newInnerDimsPos.push_back(innerDimsPos[i]);
+      }
+    }
+
+    rewriter.setInsertionPoint(packOp);
+
+    // construct a packOp in which unit inner tiles are removed.
+    Value empty = tensor::PackOp::createDestinationTensor(
+        rewriter, loc, packOp.getSource(), newInnerTiles, newInnerDimsPos,
+        SmallVector<int64_t>{});
+
+    auto newPackOp = rewriter.create<tensor::PackOp>(
+        loc, packOp.getSource(), empty, newInnerDimsPos, newInnerTiles,
+        /*padding=*/std::nullopt, SmallVector<int64_t>{});
+
+    RankedTensorType destType =
+        cast<RankedTensorType>(newPackOp.getDest().getType());
+    ArrayRef<int64_t> destShape = destType.getShape();
+    innerDimsPos = newPackOp.getInnerDimsPos();
+
+    // If we have outer dims that are not unit then this is not a tranpose so we
+    // bail.
+    if (llvm::any_of(innerDimsPos, [destShape](int64_t index) {
+          return destShape[index] != 1;
+        })) {
+      return success();
+    }
+
+    // Collect the set of transposed dimensions.
+    llvm::DenseSet<int64_t> innerDims;
+    for (auto innerDim : innerDimsPos) {
+      innerDims.insert(innerDim);
+    }
+
+    // Construct the permutation for the transpose. It is constructed as
+    // [untiled_outer_dims, inner_dims_pos].
+    int64_t srcRank = newPackOp.getSourceRank();
+    SmallVector<int64_t> perm;
+    for (int i = 0, e = srcRank; i < e; i++) {
+      if (!innerDims.count(i)) {
+        perm.push_back(i);
+      }
+    }
+    perm.append(innerDimsPos.begin(), innerDimsPos.end());
+
+    SmallVector<OpFoldResult> mixedSizes =
+        tensor::getMixedSizes(rewriter, loc, newPackOp.getSource());
+    applyPermutationToVector(mixedSizes, perm);
+    empty = rewriter.create<tensor::EmptyOp>(loc, mixedSizes,
+                                             destType.getElementType());
+    Value transposed = rewriter
+                           .create<linalg::TransposeOp>(
+                               loc, newPackOp.getSource(), empty, perm)
+                           .getResult()[0];
+
+    /*Value replacement = rewriter.create<IREE::Flow::TensorReshapeOp>(
+        loc, packOp.getType(), transposed, SmallVector<Value>{},
+        SmallVector<Value>{});*/
+
+    rewriter.replaceAllUsesWith(packOp, transposed);
+    packOp->erase();
+    newPackOp->erase();
+
+    return success();
+  }
+};
+
 } // namespace
 
 void populateFoldIntoPackAndUnpackPatterns(RewritePatternSet &patterns) {
@@ -493,6 +594,10 @@ void populateFoldIntoPackAndUnpackPatterns(RewritePatternSet &patterns) {
 void populateSimplifyPackAndUnpackPatterns(RewritePatternSet &patterns) {
   patterns.add<SimplifyPackToExpandShape, SimplifyUnPackToCollapseShape>(
       patterns.getContext());
+}
+
+void populatePackToTransposePattern(RewritePatternSet &patterns) {
+  patterns.add<SimplifyPackToTranspose>(patterns.getContext());
 }
 
 } // namespace tensor
