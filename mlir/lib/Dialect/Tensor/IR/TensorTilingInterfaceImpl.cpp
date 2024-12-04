@@ -834,7 +834,11 @@ FailureOr<TilingResult> tensor::bubbleUpPadSlice(OpBuilder &b,
     OpFoldResult endLoc =
         hasLowPad ? min(max(add(sub(offset, low), length), zero), srcSize)
                   : min(add(offset, length), srcSize);
-    OpFoldResult newLength = sub(endLoc, newOffset);
+    OpFoldResult newLength =
+        hasLowPad ? min(min(sub(srcSize, sub(offset, low)), length),
+                        sub(length, sub(low, offset)))
+                  : min(sub(srcSize, offset), length);
+    // sub(endLoc, newOffset);
     newLengths.push_back(newLength);
 
     // Check if newLength is zero. In that case, no SubTensorOp should be

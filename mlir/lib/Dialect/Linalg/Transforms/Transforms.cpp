@@ -295,7 +295,7 @@ FailureOr<LowerPackResult> linalg::lowerPack(RewriterBase &rewriter,
       llvm::interleaveComma(stripMinedShape, DBGS() << "stripMinedShape: ");
       DBGSNL(); DBGS() << "collapsed type: " << collapsed; DBGSNL(););
 
-  if (packOp.isLikePad()) {
+  if (false) {
     // Pack ops which operate as simple pads may not produce legal
     // tensor.insert_slice operations when the packed type does not rank reduce
     // to the padded type.
@@ -362,7 +362,7 @@ FailureOr<LowerUnPackOpResult> linalg::lowerUnPack(RewriterBase &rewriter,
 
   OpFoldResult zero = rewriter.getIndexAttr(0), one = rewriter.getIndexAttr(1);
   auto destTensorType = cast<RankedTensorType>(unPackOp.getDest().getType());
-  if (unPackOp.isLikeUnPad()) {
+  if (false) {
     // This unpack is just a plain unpad.
     // Just extract the slice from the higher ranked tensor.
     ArrayRef<int64_t> destShape = destTensorType.getShape();
