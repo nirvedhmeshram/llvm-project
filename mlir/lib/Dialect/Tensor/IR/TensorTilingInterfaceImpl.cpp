@@ -825,19 +825,12 @@ FailureOr<TilingResult> tensor::bubbleUpPadSlice(OpBuilder &b,
     // The original read could also have stopped in the high padding zone.
     // In that case, set the end positition of the read should be the end of
     // the source tensor. (Similar to newOffset.)
-    //
-    // endLoc = min(max(offset - low + length, 0), srcSize)
-    //
-    // The new ExtractSliceOp length is `endLoc - newOffset`.
-    //
-    // Optimization: If low = 0, then the formula can be simplified.
-    OpFoldResult endLoc =
-        hasLowPad ? min(max(add(sub(offset, low), length), zero), srcSize)
-                  : min(add(offset, length), srcSize);
-    OpFoldResult newLength =
-        hasLowPad ? min(min(sub(srcSize, sub(offset, low)), length),
-                        sub(length, sub(low, offset)))
-                  : min(sub(srcSize, offset), length);
+    // The sub(srcSize, newOffset) represents how much length we have available
+    // and the sub(length,newLow) represents how much length we want at most. 
+    OpFoldResult newLength =  min(sub(srcSize, newOffset), sub(length,newLow));
+    // Optimization: If low = 0, then newLow = 0. then newLength > 0.
+    if(hasLowPad)
+      newLength = max(newLength,zero);
     // sub(endLoc, newOffset);
     newLengths.push_back(newLength);
 
