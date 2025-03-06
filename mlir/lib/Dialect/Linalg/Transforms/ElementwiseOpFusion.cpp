@@ -1353,13 +1353,13 @@ bool mlir::linalg::areDimSequencesPreserved(
 // to preserve the accesses pattern. When no dimensions of the iteration
 // space are collapsable and empty vector is returned.
 static SmallVector<ReassociationIndices>
-getCollapsableIterationSpaceDims(GenericOp genericOp, OpOperand *fusableOperand,
+getCollapsableIterationSpaceDims(LinalgOp linalgOp, OpOperand *fusableOperand,
                                  ArrayRef<ReassociationIndices> reassociation) {
   // Some basic checks for this fusion to be valid.
-  if (!genericOp.hasPureTensorSemantics())
+  if (!linalgOp.hasPureTensorSemantics())
     return {};
 
-  if (!llvm::all_of(genericOp.getIndexingMapsArray(), [](AffineMap map) {
+  if (!llvm::all_of(linalgOp.getIndexingMapsArray(), [](AffineMap map) {
         return map.isProjectedPermutation();
       })) {
     return {};
@@ -1367,11 +1367,11 @@ getCollapsableIterationSpaceDims(GenericOp genericOp, OpOperand *fusableOperand,
 
   // Compute all the loops with the reduction iterator types.
   SmallVector<unsigned> reductionDims;
-  genericOp.getReductionDims(reductionDims);
+  linalgOp.getReductionDims(reductionDims);
 
   llvm::SmallDenseSet<unsigned, 4> processedIterationDims;
-  AffineMap indexingMap = genericOp.getMatchingIndexingMap(fusableOperand);
-  auto iteratorTypes = genericOp.getIteratorTypesArray();
+  AffineMap indexingMap = linalgOp.getMatchingIndexingMap(fusableOperand);
+  auto iteratorTypes = linalgOp.getIteratorTypesArray();
   SmallVector<ReassociationIndices> iterationSpaceReassociation;
   for (ReassociationIndicesRef foldedRangeDims : reassociation) {
     assert(!foldedRangeDims.empty() && "unexpected empty reassociation");
@@ -1433,7 +1433,7 @@ getCollapsableIterationSpaceDims(GenericOp genericOp, OpOperand *fusableOperand,
     }
 
     // Check that the sequence is preserved in all indexing maps.
-    if (llvm::any_of(genericOp.getIndexingMapsArray(),
+    if (llvm::any_of(linalgOp.getIndexingMapsArray(),
                      [&](AffineMap indexingMap) {
                        return !isDimSequencePreserved(indexingMap,
                                                       foldedIterationSpaceDims);
@@ -1913,6 +1913,83 @@ private:
   ControlFusionFn controlFoldingReshapes;
 };
 
+/// Pattern to fold a tensor.collapse_shape op with its producer generic op
+/// by expanding the dimensionality of the loop in the producer op.
+struct FoldReshapeWithGenericOpByCollapsing
+    : public OpRewritePattern<tensor::CollapseShapeOp> {
+
+  FoldReshapeWithGenericOpByCollapsing(MLIRContext *context,
+                                       ControlFusionFn foldReshapes,
+                                       PatternBenefit benefit = 1)
+      : OpRewritePattern<tensor::CollapseShapeOp>(context, benefit),
+        controlFoldingReshapes(std::move(foldReshapes)) {}
+
+  LogicalResult matchAndRewrite(tensor::CollapseShapeOp reshapeOp,
+                                PatternRewriter &rewriter) const override {
+    // Fold only if all constraints of fusing with reshape by expansion are met.
+    auto producerResult = dyn_cast<OpResult>(reshapeOp.getSrc());
+    if (!producerResult) {
+      return rewriter.notifyMatchFailure(reshapeOp,
+                                         "source not produced by an operation");
+    }
+
+    // auto producerGeneric = dyn_cast<GenericOp>(producerResult.getOwner());
+    auto producer = dyn_cast<LinalgOp>(producerResult.getOwner());
+    if (!producer) {
+      return rewriter.notifyMatchFailure(reshapeOp,
+                                         "producer not a generic op");
+    }
+
+    SmallVector<ReassociationIndices> collapsableIterationDims =
+        getCollapsableIterationSpaceDims(producer, &reshapeOp.getSrcMutable(),
+                                         reshapeOp.getReassociationIndices());
+    if (collapsableIterationDims.empty()) {
+      return rewriter.notifyMatchFailure(
+          reshapeOp, "failed preconditions of fusion with producer generic op");
+    }
+
+    if (!controlFoldingReshapes(&reshapeOp.getSrcMutable())) {
+      return rewriter.notifyMatchFailure(reshapeOp,
+                                         "fusion blocked by control function");
+    }
+
+    /*std::optional<SmallVector<Value>> replacementValues =
+        fuseWithReshapeByExpansion(
+            producer, reshapeOp,
+            producer.getDpsInitOperand(producerResult.getResultNumber()),
+            rewriter);*/
+    std::optional<CollapseResult> collapseResult =
+        collapseOpIterationDims(producer, collapsableIterationDims, rewriter);
+    if (!collapseResult) {
+      return rewriter.notifyMatchFailure(
+          producer, "failed to do the fusion by collapsing transformation");
+    }
+
+    if (!collapseResult) {
+      return rewriter.notifyMatchFailure(reshapeOp,
+                                         "fusion by expansion failed");
+    }
+
+    // Find the replacement for the reshape op. Since the replacements have the
+    // same type as the returns of the original generic op, the consumer reshape
+    // op can be replaced by the source of the collapse_shape op that defines
+    // the replacement.
+    Value reshapeReplacement =
+        (collapseResult
+             ->results)[cast<OpResult>(reshapeOp.getSrc()).getResultNumber()];
+    if (auto collapseOp =
+            reshapeReplacement.getDefiningOp<tensor::ExpandShapeOp>()) {
+      reshapeReplacement = collapseOp.getSrc();
+    }
+    rewriter.replaceOp(reshapeOp, reshapeReplacement);
+    rewriter.replaceOp(producer, collapseResult->results);
+    return success();
+  }
+
+private:
+  ControlFusionFn controlFoldingReshapes;
+};
+
 class FoldPadWithProducerReshapeOpByCollapsing
     : public OpRewritePattern<tensor::PadOp> {
 public:
@@ -2241,6 +2318,8 @@ void mlir::linalg::populateFoldReshapeOpsByCollapsingPatterns(
                                                       controlFoldingReshapes);
   patterns.add<FoldPadWithProducerReshapeOpByCollapsing>(
       patterns.getContext(), controlFoldingReshapes);
+  patterns.add<FoldReshapeWithGenericOpByCollapsing>(patterns.getContext(),
+                                                     controlFoldingReshapes);
 }
 
 void mlir::linalg::populateElementwiseOpsFusionPatterns(
