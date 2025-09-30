@@ -123,7 +123,8 @@ static LogicalResult peelForLoop(RewriterBase &b, ForOp forOp,
   auto lbInt = getConstantIntValue(forOp.getLowerBound());
   auto ubInt = getConstantIntValue(forOp.getUpperBound());
   auto stepInt = getConstantIntValue(forOp.getStep());
-
+  llvm::outs()<<"Here 2.1\n";
+  llvm::outs().flush();
   // No specialization necessary if step size is 1. Also bail out in case of an
   // invalid zero or negative step which might have happened during folding.
   if (stepInt && *stepInt <= 1)
@@ -131,8 +132,8 @@ static LogicalResult peelForLoop(RewriterBase &b, ForOp forOp,
 
   // No specialization necessary if step already divides upper bound evenly.
   // Fast path: lb, ub and step are constants.
-  if (lbInt && ubInt && stepInt && (*ubInt - *lbInt) % *stepInt == 0)
-    return failure();
+  llvm::outs()<<"Here 2.2\n";
+  llvm::outs().flush();
   // Slow path: Examine the ops that define lb, ub and step.
   AffineExpr sym0, sym1, sym2;
   bindSymbols(b.getContext(), sym0, sym1, sym2);
@@ -143,14 +144,16 @@ static LogicalResult peelForLoop(RewriterBase &b, ForOp forOp,
   if (auto constExpr = dyn_cast<AffineConstantExpr>(map.getResult(0)))
     if (constExpr.getValue() == 0)
       return failure();
-
+  llvm::outs()<<"Here 2.3\n";
+  llvm::outs().flush();
+  AffineExpr sym3, sym4;
+  bindSymbols(b.getContext(), sym3, sym4);
   // New upper bound: %ub - (%ub - %lb) mod %step
-  auto modMap = AffineMap::get(0, 3, {sym1 - ((sym1 - sym0) % sym2)});
+  auto modMap = AffineMap::get(0, 2, {sym3 - sym4});
   b.setInsertionPoint(forOp);
   auto loc = forOp.getLoc();
   splitBound = b.createOrFold<AffineApplyOp>(loc, modMap,
-                                             ValueRange{forOp.getLowerBound(),
-                                                        forOp.getUpperBound(),
+                                             ValueRange{forOp.getUpperBound(),
                                                         forOp.getStep()});
   if (splitBound.getType() != forOp.getLowerBound().getType())
     splitBound = b.createOrFold<arith::IndexCastOp>(
@@ -166,6 +169,8 @@ static LogicalResult peelForLoop(RewriterBase &b, ForOp forOp,
   // Set new upper loop bound.
   b.modifyOpInPlace(forOp,
                     [&]() { forOp.getUpperBoundMutable().assign(splitBound); });
+  llvm::outs()<<"Here 2.4\n";
+  llvm::outs().flush();
 
   return success();
 }
@@ -201,9 +206,12 @@ LogicalResult mlir::scf::peelForLoopAndSimplifyBounds(RewriterBase &rewriter,
                                                       ForOp &partialIteration) {
   Value previousUb = forOp.getUpperBound();
   Value splitBound;
+  llvm::outs()<<"Here 2.0\n";
+  llvm::outs().flush();
   if (failed(peelForLoop(rewriter, forOp, partialIteration, splitBound)))
     return failure();
-
+  llvm::outs()<<"Here 2.n\n";
+  llvm::outs().flush();
   // Rewrite affine.min and affine.max ops.
   rewriteAffineOpAfterPeeling(rewriter, forOp, partialIteration, previousUb);
 
@@ -267,7 +275,6 @@ struct ForLoopPeelingPattern : public OpRewritePattern<ForOp> {
     if (forOp.getUnsignedCmp())
       return rewriter.notifyMatchFailure(forOp,
                                          "unsigned loops are not supported");
-
     // Do not peel already peeled loops.
     if (forOp->hasAttr(kPeeledLoopLabel))
       return failure();
