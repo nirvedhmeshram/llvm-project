@@ -10,6 +10,7 @@
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
@@ -639,6 +640,13 @@ LogicalResult BlockMergeCluster::addToCluster(BlockEquivalenceData &blockData) {
       // Check that the types of the operands match.
       if (lhsOperand.getType() != rhsOperand.getType())
         return failure();
+      auto operandType = dyn_cast<MemRefType>(lhsOperand.getType());
+      if (operandType) {
+        if (auto addrSpace = dyn_cast_if_present<gpu::AddressSpaceAttr>(operandType.getMemorySpace())) {
+          if (addrSpace.getValue() == gpu::AddressSpace::Private)
+            return failure();
+        }
+      }
 
       // Check that these uses are both external, or both internal.
       bool lhsIsInBlock = lhsOperand.getParentBlock() == leaderBlock;
@@ -875,6 +883,7 @@ LogicalResult BlockMergeCluster::merge(RewriterBase &rewriter) {
 /// failure otherwise.
 static LogicalResult mergeIdenticalBlocks(RewriterBase &rewriter,
                                           Region &region) {
+  LDBG() << "In this mergeIndentical 1";
   if (region.empty() || region.hasOneBlock())
     return failure();
 
@@ -931,6 +940,7 @@ static LogicalResult mergeIdenticalBlocks(RewriterBase &rewriter,
 /// new block arguments as necessary.
 static LogicalResult mergeIdenticalBlocks(RewriterBase &rewriter,
                                           MutableArrayRef<Region> regions) {
+  LDBG() << "In this mergeIndentical 2";
   llvm::SmallSetVector<Region *, 1> worklist;
   for (auto &region : regions)
     worklist.insert(&region);
@@ -1070,14 +1080,18 @@ LogicalResult mlir::simplifyRegions(RewriterBase &rewriter,
                                     MutableArrayRef<Region> regions,
                                     bool mergeBlocks) {
   bool eliminatedBlocks = succeeded(eraseUnreachableBlocks(rewriter, regions));
+  LDBG() << "Done with eraseUnreachableBlocks";
   bool eliminatedOpsOrArgs = succeeded(runRegionDCE(rewriter, regions));
   bool mergedIdenticalBlocks = false;
   bool droppedRedundantArguments = false;
+  LDBG() << "Done with eliminatedOpsOrArgs";
   if (mergeBlocks) {
     mergedIdenticalBlocks = succeeded(mergeIdenticalBlocks(rewriter, regions));
     droppedRedundantArguments =
         succeeded(dropRedundantArguments(rewriter, regions));
+  LDBG() << "Done with mergeIdenticalBlocks";
   }
+  LDBG() << "Done with simpilify";
   return success(eliminatedBlocks || eliminatedOpsOrArgs ||
                  mergedIdenticalBlocks || droppedRedundantArguments);
 }
